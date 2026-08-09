@@ -1,0 +1,104 @@
+--- a/codex-rs/http-client/src/outbound_proxy.rs
++++ b/codex-rs/http-client/src/outbound_proxy.rs
+@@ -146,11 +146,23 @@
+ pub struct HttpClientFactory {
+     outbound_proxy_policy: OutboundProxyPolicy,
+     chatgpt_cookie_store: Option<Arc<ChatGptCookieStore>>,
++    explicit_proxy: Option<Arc<ExplicitProxy>>,
+ }
+ 
++/// Proxy chosen by the embedding application rather than discovered from the
++/// system or the environment.
++///
++/// The URL is redacted from `Debug` output because it may carry credentials.
++#[derive(PartialEq, Eq)]
++struct ExplicitProxy {
++    url: String,
++    no_proxy: Option<String>,
++}
++
+ impl PartialEq for HttpClientFactory {
+     fn eq(&self, other: &Self) -> bool {
+         self.outbound_proxy_policy == other.outbound_proxy_policy
++            && self.explicit_proxy == other.explicit_proxy
+             && self
+                 .chatgpt_cookie_store
+                 .as_ref()
+@@ -168,6 +180,10 @@
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         f.debug_struct("HttpClientFactory")
+             .field("outbound_proxy_policy", &self.outbound_proxy_policy)
++            .field(
++                "explicit_proxy",
++                &self.explicit_proxy.as_ref().map(|_| "<redacted>"),
++            )
+             .finish()
+     }
+ }
+@@ -178,9 +194,35 @@
+         Self {
+             outbound_proxy_policy,
+             chatgpt_cookie_store: None,
++            explicit_proxy: None,
+         }
++    }
++
++    /// Sends every outbound request through `url`, whatever the policy and the
++    /// environment would otherwise resolve.
++    ///
++    /// `url` accepts the schemes reqwest accepts, so `http`, `https`, and — when
++    /// the `socks` feature is enabled — `socks5` and `socks5h`. `no_proxy` takes
++    /// the same comma-separated host list as the `NO_PROXY` variable.
++    pub fn with_explicit_proxy(mut self, url: String, no_proxy: Option<String>) -> Self {
++        self.explicit_proxy = Some(Arc::new(ExplicitProxy { url, no_proxy }));
++        self
+     }
+ 
++    /// Returns whether the application pinned a proxy for this factory.
++    pub fn has_explicit_proxy(&self) -> bool {
++        self.explicit_proxy.is_some()
++    }
++
++    fn explicit_route(&self) -> Option<OutboundProxyRoute> {
++        self.explicit_proxy
++            .as_ref()
++            .map(|proxy| OutboundProxyRoute::Proxy {
++                url: proxy.url.clone(),
++                no_proxy: proxy.no_proxy.clone(),
++            })
++    }
++
+     /// Adds process-scoped cookies to requests made by ChatGPT cookie-store clients.
+     pub fn with_chatgpt_cookies(mut self, cookies: impl IntoIterator<Item = HeaderValue>) -> Self {
+         let cookies = cookies.into_iter().collect::<Vec<_>>();
+@@ -210,6 +252,9 @@
+     /// resolution is unavailable, explicit environment settings are resolved before falling back
+     /// to a direct route.
+     pub fn resolve_proxy_route(&self, request_url: &str) -> OutboundProxyRoute {
++        if let Some(route) = self.explicit_route() {
++            return route;
++        }
+         resolve_proxy_route(
+             &ProcessEnv,
+             request_url,
+@@ -223,6 +268,10 @@
+         &self,
+         request_url: String,
+     ) -> io::Result<OutboundProxyRoute> {
++        if let Some(route) = self.explicit_route() {
++            return Ok(route);
++        }
++
+         if matches!(
+             self.outbound_proxy_policy,
+             OutboundProxyPolicy::ReqwestDefault
+@@ -272,6 +321,9 @@
+         request_url: &str,
+         route_class: ClientRouteClass,
+     ) -> Result<reqwest::Client, BuildRouteAwareHttpClientError> {
++        if let Some(route) = self.explicit_route() {
++            return self.build_reqwest_client_for_resolved_route(builder, route_class, &route);
++        }
+         build_reqwest_client_for_route(
+             builder,
+             request_url,

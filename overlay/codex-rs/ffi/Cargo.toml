@@ -1,0 +1,42 @@
+[package]
+name = "codex-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "codex_ffi"
+path = "src/lib.rs"
+crate-type = ["cdylib", "staticlib"]
+doctest = false
+
+# Membership in the Codex workspace is deliberate: it binds this crate to the
+# dependency graph Codex itself locks and tests, including the forked websocket
+# crates pinned in [patch.crates-io].
+[dependencies]
+codex-api = { workspace = true }
+codex-client = { workspace = true }
+codex-config = { workspace = true }
+codex-http-client = { workspace = true }
+codex-login = { workspace = true }
+codex-model-provider = { workspace = true }
+codex-model-provider-info = { workspace = true }
+http = { workspace = true }
+# Cargo unifies features across the graph, so asking for `socks` here is what
+# lets every Codex client accept socks5:// and socks5h:// proxy URLs.
+reqwest = { workspace = true, features = ["socks"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The library is called from host-owned threads whose lifetime it does not
+# control. glibc keeps a large arena behind after such a thread has gone away;
+# mimalloc can reclaim the abandoned thread heap instead, keeping repeated FFI
+# operations bounded by live work rather than by the number of past callers.
+# Keep its stable v2 core: the v3 core can observe a partially initialized
+# thread-local heap when a native library is entered concurrently from foreign
+# thread-pool threads.
+libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["extended", "v2"] }
+mimalloc = { version = "=0.1.52", default-features = false }

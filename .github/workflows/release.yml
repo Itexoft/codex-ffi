@@ -1,0 +1,167 @@
+name: release
+
+on:
+  schedule:
+    # Codex ships a stable release roughly weekly; four checks a day is plenty.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Codex tag to build. Defaults to the newest stable Codex release."
+        required: false
+      force:
+        description: "Build even when a release for that tag already exists."
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      upstream_tag: ${{ steps.pick.outputs.upstream_tag }}
+      tag: ${{ steps.pick.outputs.tag }}
+      version: ${{ steps.pick.outputs.version }}
+      build: ${{ steps.pick.outputs.build }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${REQUESTED_TAG}" ]]; then
+            upstream_tag="${REQUESTED_TAG}"
+          else
+            # `releases/latest` skips prereleases, so alpha tags never trigger a build.
+            upstream_tag="$(gh api repos/openai/codex/releases/latest --jq .tag_name)"
+          fi
+
+          # Codex validates this tag shape in its own release workflow, so anything
+          # else means the assumption behind our naming no longer holds.
+          [[ "${upstream_tag}" == rust-v* ]] || {
+            echo "unexpected Codex tag '${upstream_tag}', expected rust-vX.Y.Z" >&2
+            exit 1
+          }
+          version="${upstream_tag#rust-v}"
+          tag="codex-ffi-v${version}"
+
+          if [[ "${FORCE}" != "true" ]] && gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            build=false
+          else
+            build=true
+          fi
+
+          echo "upstream_tag=${upstream_tag}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "build=${build}" >> "${GITHUB_OUTPUT}"
+          echo "codex ${upstream_tag} -> release ${tag}, build ${build}" >> "${GITHUB_STEP_SUMMARY}"
+
+  build:
+    name: ${{ matrix.rid }}
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            rid: osx-arm64
+          - runner: macos-15
+            target: x86_64-apple-darwin
+            rid: osx-x64
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rid: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            rid: linux-arm64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            rid: win-x64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            rid: win-arm64
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: never
+      # Codex release builds fetch git dependencies with the git CLI; keep that.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Only guarantees that rustup exists. The toolchain itself is pinned by
+      # rust-toolchain.toml inside the Codex checkout.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch Codex ${{ needs.resolve.outputs.upstream_tag }}
+        run: scripts/fetch-upstream.sh "${{ needs.resolve.outputs.upstream_tag }}" upstream
+
+      - name: Apply overlay
+        run: scripts/compose.sh upstream
+
+      - name: Build ${{ matrix.target }}
+        run: scripts/build.sh upstream "${{ matrix.target }}" "${{ matrix.rid }}" dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.rid }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish release
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify the artifact set
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l dist
+          count="$(find dist -type f | wc -l | tr -d ' ')"
+          [[ "${count}" == "6" ]] || {
+            echo "expected 6 binaries, found ${count}" >&2
+            exit 1
+          }
+
+      - name: Create release ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          gh release delete "${TAG}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "${TAG}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "codex-ffi v${VERSION}" \
+            --notes "Built from openai/codex ${UPSTREAM_TAG}."

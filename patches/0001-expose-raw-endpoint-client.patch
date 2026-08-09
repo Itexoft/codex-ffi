@@ -1,0 +1,38 @@
+--- a/codex-rs/Cargo.toml
++++ b/codex-rs/Cargo.toml
+@@ -131,6 +131,7 @@
+     "codex-experimental-api-macros",
+     "plugin",
+     "model-provider",
++    "ffi",
+ ]
+ resolver = "2"
+ 
+--- a/codex-rs/codex-api/src/endpoint/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/mod.rs
+@@ -2,6 +2,7 @@
+ pub(crate) mod images;
+ pub(crate) mod memories;
+ pub(crate) mod models;
++pub(crate) mod raw;
+ pub(crate) mod realtime_call;
+ pub(crate) mod realtime_websocket;
+ pub(crate) mod responses;
+@@ -13,6 +14,7 @@
+ pub use images::ImagesClient;
+ pub use memories::MemoriesClient;
+ pub use models::ModelsClient;
++pub use raw::RawClient;
+ pub use realtime_call::RealtimeCallClient;
+ pub use realtime_call::RealtimeCallResponse;
+ pub use realtime_websocket::RealtimeContextAppendChannel;
+--- a/codex-rs/codex-api/src/lib.rs
++++ b/codex-rs/codex-api/src/lib.rs
+@@ -51,6 +51,7 @@
+ pub use crate::endpoint::ImagesClient;
+ pub use crate::endpoint::MemoriesClient;
+ pub use crate::endpoint::ModelsClient;
++pub use crate::endpoint::RawClient;
+ pub use crate::endpoint::RealtimeCallClient;
+ pub use crate::endpoint::RealtimeCallResponse;
+ pub use crate::endpoint::RealtimeContextAppendChannel;
